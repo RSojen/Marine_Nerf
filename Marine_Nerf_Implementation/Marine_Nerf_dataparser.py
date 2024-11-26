@@ -24,9 +24,9 @@ from nerfstudio.utils.rich_utils import CONSOLE
 MAX_AUTO_RESOLUTION = 1600
 
 @dataclass
-class Marine_Nerf_Dataparser(DataParserConfig):
+class Marine_Nerf_Dataparser_Config(DataParserConfig):
 
-    _target: Type = field(default_factory=lambda: Marine_Nerf)
+    _target: Type = field(default_factory=lambda: Marine_Nerf_Dataparser)
     """target class to instantiate"""
     data: Path = Path()
     """Directory or explicit json file path specifying location of data."""
@@ -49,7 +49,7 @@ class Marine_Nerf_Dataparser(DataParserConfig):
 
 
 @dataclass
-class Marine_Nerf(DataParser):
+class Marine_Nerf_Dataparser(DataParser):
 
     config: Marine_Nerf_Dataparser
     downscale_factor: Optional[int] = None
@@ -151,8 +151,6 @@ class Marine_Nerf(DataParser):
                 )
                 sky_masks_filenames.append(sky_seg_fname)
 
-
-            
 
             assert len(mask_filenames) == 0 or (
                     len(mask_filenames) == len(image_filenames)
@@ -283,6 +281,48 @@ class Marine_Nerf(DataParser):
                 camera_type=camera_type,
                 metadata = {"sky_masks": sky_images}
             )
+
+            #create metadata
+            applied_transform = None
+            colmap_path = self.config.data / "colmap/sparse/0"
+            if "applied_transform" in meta:
+                applied_transform = torch.tensor(meta["applied_transform"], dtype=transform_matrix.dtype)
+            elif colmap_path.exists():
+                # For converting from colmap, this was the effective value of applied_transform that was being
+                # used before we added the applied_transform field to the output dataformat.
+                meta["applied_transform"] = [[0, 1, 0, 0], [1, 0, 0, 0], [0, 0, -1, 0]]
+                applied_transform = torch.tensor(meta["applied_transform"], dtype=transform_matrix.dtype)
+
+            if applied_transform is not None:
+                dataparser_transform_matrix = transform_matrix @ torch.cat(
+                    [applied_transform, torch.tensor([[0, 0, 0, 1]], dtype=transform_matrix.dtype)], 0
+                )
+            else:
+                dataparser_transform_matrix = transform_matrix
+
+            if "applied_scale" in meta:
+                applied_scale = float(meta["applied_scale"])
+                scale_factor *= applied_scale
+
+            # reinitialize metadata for dataparser_outputs
+            metadata = {}
+
+            dataparser_outputs = DataparserOutputs(
+                image_filenames=image_filenames,
+                cameras=cameras,
+                scene_box=scene_box,
+                mask_filenames=mask_filenames if len(mask_filenames) > 0 else None,
+                dataparser_scale=scale_factor,
+                dataparser_transform=dataparser_transform_matrix,
+                metadata={
+                    "depth_filenames": depth_filenames if len(depth_filenames) > 0 else None,
+                    "sky_mask_filenames": sky_masks_filenames,
+                    "depth_unit_scale_factor": self.config.depth_unit_scale_factor,
+                    "mask_color": self.config.mask_color,
+                    **metadata,
+                },
+            )
+            return dataparser_outputs
 
 
 

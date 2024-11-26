@@ -385,15 +385,16 @@ class Marine_Nerf_Model(Model):
         sky_mask = batch["sky_mask"]
         ray_samples = outputs["ray_samples_list"]
         weights_list = outputs["weights_list"]
+
         #iterate through masks
         indices = torch.masked_fill(torch.cumsum(sky_mask.int(), dim=1), ~sky_mask, 0)
-        masked = torch.scatter(input=torch.zeros_like(ray_samples), dim=1, index=indices, src=ray_samples)[:, 1:]
+        masked_samples = torch.scatter(input=torch.zeros_like(ray_samples), dim=1, index=indices, src=ray_samples)[:, 1:]
+        masked_weights = torch.scatter(input=torch.zeros_like(weights_list), dim=1, index=indices, src=weights_list)[:, 1:]
 
         for i in range(len(outputs["weights_list"])):
             loss_dict["sky_loss"] += sky_segmentation_loss(
-                weights=outputs["weights_list"][i],
-                ray_samples=outputs["ray_samples_list"][i],
-
+                weights=masked_samples[i],
+                ray_samples=masked_weights[i],
             ) / len(outputs["weights_list"])
 
         loss_dict["rgb_loss"] = self.rgb_loss(gt_rgb, pred_rgb)

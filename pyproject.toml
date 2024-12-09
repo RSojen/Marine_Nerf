@@ -1,0 +1,13 @@
+
+[project]
+name = "marine-nerf"
+dependencies = [
+    "nerfstudio"
+]
+
+[tool.setuptools.packages.find]
+include = ["marine-nerf*"]
+
+[project.entry-points.'nerfstudio.dataparser_configs']
+custom-dataparser = 'Marine_Nerf.Marine_Nerf_config:Marine_Nerf_dataparser'
+

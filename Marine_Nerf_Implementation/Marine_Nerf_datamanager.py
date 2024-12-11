@@ -6,16 +6,19 @@ from copy import deepcopy
 from dataclasses import dataclass, field
 from functools import cached_property
 from pathlib import Path
-from typing import Dict, ForwardRef, Generic, List, Literal, Optional, Tuple, Type, Union, cast, get_args, get_origin
+from typing import Dict, ForwardRef, Generic, List, Literal, Optional, Tuple, Type, Union, cast, get_args, get_origin, Any, Callable
 
 import cv2
 import fpsample
 import numpy as np
 import torch
+import tyro
 from rich.progress import track
 from torch.nn import Parameter
-from typing_extensions import assert_never
+from typing_extensions import assert_never, TypeVar
 
+from nerfstudio.cameras.camera_optimizers import CameraOptimizerConfig
+from nerfstudio.cameras.cameras import Cameras, CameraType
 from nerfstudio.data.dataparsers.base_dataparser import DataparserOutputs
 from nerfstudio.data.datasets.base_dataset import InputDataset
 from nerfstudio.data.pixel_samplers import PatchPixelSamplerConfig, PixelSampler, PixelSamplerConfig
@@ -23,15 +26,21 @@ from nerfstudio.data.utils.dataloaders import CacheDataloader, FixedIndicesEvalD
 from nerfstudio.model_components.ray_generators import RayGenerator
 from nerfstudio.utils.misc import get_orig_class
 from nerfstudio.utils.rich_utils import CONSOLE
+from nerfstudio.configs.dataparser_configs import AnnotatedDataParserUnion
+from nerfstudio.data.datamanagers.base_datamanager import VanillaDataManager, VanillaDataManagerConfig
+
+from nerfstudio.data.datamanagers.base_datamanager import DataManager, DataManagerConfig, TDataset
+from nerfstudio.data.utils.nerfstudio_collate import nerfstudio_collate
+from Marine_Nerf_Implementation.Marine_Nerf_dataparser import Marine_Nerf_Dataparser_Config
 
 
 @dataclass
-class VanillaDataManagerConfig(DataManagerConfig):
+class Marine_Nerf_DataManagerConfig(DataManagerConfig):
     """A basic data manager for a ray-based model"""
 
-    _target: Type = field(default_factory=lambda: VanillaDataManager)
+    _target: Type = field(default_factory=lambda: Marine_Nerf_DataManager)
     """Target class to instantiate."""
-    dataparser: AnnotatedDataParserUnion = field(default_factory=BlenderDataParserConfig)
+    dataparser: AnnotatedDataParserUnion = field(default_factory=Marine_Nerf_Dataparser_Config)
     """Specifies the dataparser used to unpack the data."""
     train_num_rays_per_batch: int = 1024
     """Number of rays per batch to use per training iteration."""
@@ -78,7 +87,7 @@ class VanillaDataManagerConfig(DataManagerConfig):
 TDataset = TypeVar("TDataset", bound=InputDataset, default=InputDataset)
 
 
-class VanillaDataManager(DataManager, Generic[TDataset]):
+class Marine_Nerf_DataManager(DataManager, Generic[TDataset]):
     """Basic stored data manager implementation.
 
     This is pretty much a port over from our old dataloading utilities, and is a little jank
@@ -91,7 +100,7 @@ class VanillaDataManager(DataManager, Generic[TDataset]):
         config: the DataManagerConfig used to instantiate class
     """
 
-    config: VanillaDataManagerConfig
+    config: Marine_Nerf_DataManagerConfig
     train_dataset: TDataset
     eval_dataset: TDataset
     train_dataparser_outputs: DataparserOutputs
@@ -100,7 +109,7 @@ class VanillaDataManager(DataManager, Generic[TDataset]):
 
     def __init__(
         self,
-        config: VanillaDataManagerConfig,
+        config: Marine_Nerf_DataManagerConfig,
         device: Union[torch.device, str] = "cpu",
         test_mode: Literal["test", "val", "inference"] = "val",
         world_size: int = 1,
@@ -257,6 +266,7 @@ class VanillaDataManager(DataManager, Generic[TDataset]):
         assert isinstance(image_batch, dict)
         batch = self.train_pixel_sampler.sample(image_batch)
         ray_indices = batch["indices"]
+        print("generating rays")
         ray_bundle = self.train_ray_generator(ray_indices)
         return ray_bundle, batch
 

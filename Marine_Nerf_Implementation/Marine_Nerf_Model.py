@@ -10,12 +10,13 @@ from torchmetrics import PeakSignalNoiseRatio
 from torchmetrics.functional import structural_similarity_index_measure
 from torchmetrics.image.lpip import LearnedPerceptualImagePatchSimilarity
 
+from nerfstudio.cameras.camera_optimizers import CameraOptimizer, CameraOptimizerConfig
 from nerfstudio.cameras.rays import RayBundle, RaySamples
 from nerfstudio.engine.callbacks import TrainingCallback, TrainingCallbackAttributes, TrainingCallbackLocation
 from nerfstudio.field_components.field_heads import FieldHeadNames
 from nerfstudio.field_components.spatial_distortions import SceneContraction
 from nerfstudio.fields.density_fields import HashMLPDensityField
-from nerfstudio.fields.Marine_Nerf_Field import Marine_Nerf_Field
+from Marine_Nerf_Implementation.Marine_Nerf_Field import Marine_Nerf_Field
 from nerfstudio.model_components.losses import (
     MSELoss,
     distortion_loss,
@@ -37,7 +38,7 @@ from nerfstudio.utils import colormaps
 
 @dataclass
 class Marine_Nerf_ModelConfig(ModelConfig):
-    _target: Type = field(default_factory=lambda: NerfactoModel)
+    _target: Type = field(default_factory=lambda: Marine_Nerf_Model)
     near_plane: float = 0.05
     """How far along the ray to start sampling."""
     far_plane: float = 1000.0
@@ -109,6 +110,8 @@ class Marine_Nerf_ModelConfig(ModelConfig):
     """Which implementation to use for the model."""
     appearance_embed_dim: int = 32
     """Dimension of the appearance embedding."""
+    camera_optimizer: CameraOptimizerConfig = field(default_factory=lambda: CameraOptimizerConfig(mode="SO3xR3"))
+    """Config of the camera optimizer to use"""
 
 
 class Marine_Nerf_Model(Model):
@@ -118,7 +121,7 @@ class Marine_Nerf_Model(Model):
 
     def populate_modules(self):
 
-        super.populate_modules()
+        super().populate_modules()
 
         if self.config.disable_scene_contraction:
             scene_contraction = None
@@ -142,11 +145,15 @@ class Marine_Nerf_Model(Model):
             implementation=self.config.implementation,
         )
 
-        self.desnity_fns = []
+        self.camera_optimizer: CameraOptimizer = self.config.camera_optimizer.setup(
+            num_cameras=self.num_train_data, device="cpu"
+        )
+
+        self.density_fns = []
         num_prop_nets = self.config.num_proposal_iterations
 
         #build the proposal network
-        self.proposal_network = torch.nn.ModuleList()
+        self.proposal_networks = torch.nn.ModuleList()
         if (self.config.use_same_proposal_network):
             assert len(self.config.proposal_net_args_list) == 1, "Only one proposal network is allowed."
             prop_net_args = self.config.proposal_net_args_list[0]
@@ -262,6 +269,7 @@ class Marine_Nerf_Model(Model):
 
     def get_outputs(self, ray_bundle: RayBundle):
         # apply the camera optimizer pose tweaks
+        print("getting outputs")
         if self.training:
             self.camera_optimizer.apply_to_raybundle(ray_bundle)
         ray_samples: RaySamples
@@ -292,6 +300,7 @@ class Marine_Nerf_Model(Model):
             pred_normals = self.renderer_normals(field_outputs[FieldHeadNames.PRED_NORMALS], weights=weights)
             outputs["normals"] = self.normals_shader(normals)
             outputs["pred_normals"] = self.normals_shader(pred_normals)
+
         # These use a lot of GPU memory, so we avoid storing them for eval.
         if self.training:
             outputs["weights_list"] = weights_list

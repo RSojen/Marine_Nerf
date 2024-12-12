@@ -220,15 +220,6 @@ class Marine_Nerf_Dataparser(DataParser):
         #multiply position values in poses by the scale factor
         poses[:,:3,3] *= scale_factor
 
-        #generate binary masks from the sky segmentation masks
-
-        sky_images = []
-        for sky_mask_path in sky_masks_filenames:
-            sky_image = cv2.imread(sky_mask_path)
-            sky_images.append(sky_image)
-        sky_images = torch.from_numpy(np.array(sky_images).astype(np.float32))
-
-
         image_filenames = [image_filenames[i] for i in indices]
         mask_filenames = [mask_filenames[i] for i in indices] if len(mask_filenames) > 0 else []
         depth_filenames = [depth_filenames[i] for i in indices] if len(depth_filenames) > 0 else []
@@ -236,9 +227,6 @@ class Marine_Nerf_Dataparser(DataParser):
 
         idx_tensor = torch.tensor(indices, dtype=torch.long)
         poses = poses[idx_tensor]
-
-        #sky segmentation binary masks
-        sky_masks = sky_images[idx_tensor]
 
         #orient and scale the poses to fit in the bounding box
         aabb_scale = self.config.scene_scale

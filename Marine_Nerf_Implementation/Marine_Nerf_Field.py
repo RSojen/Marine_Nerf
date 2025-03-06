@@ -1,5 +1,6 @@
 from typing import Dict, Literal, Optional, Tuple
 
+import numpy as np
 import torch
 from torch import Tensor, nn
 
@@ -18,13 +19,13 @@ from nerfstudio.field_components.field_heads import (
 )
 from nerfstudio.field_components.mlp import MLP
 from nerfstudio.field_components.spatial_distortions import SpatialDistortion
-from nerfstudio.fields.base_field import Field, shift_directions_for_tcnn
+from nerfstudio.fields.base_field import Field, get_normalized_directions
 
 class Marine_Nerf_Field(Field):
 
     aabb: Tensor
 
-def __init__(
+    def __init__(
         self,
         aabb: Tensor,
         num_images: int,
@@ -51,87 +52,89 @@ def __init__(
         spatial_distortion: Optional[SpatialDistortion] = None,
         implementation: Literal["tcnn", "torch"] = "tcnn",
         ) -> None:
-    super.__init__()
 
-    self.register_buffer("aabb", aabb)
-    self.geo_feat_dim = geo_feat_dim
+        super().__init__()
 
-    self.register_buffer("max_res", torch.tensor(max_res))
-    self.register_buffer("num_levels", torch.tensor(num_levels))
-    self.register_buffer("log2_hashmap_size", torch.tensor(log2_hashmap_size))
+        self.register_buffer("aabb", aabb)
+        self.geo_feat_dim = geo_feat_dim
 
-    self.spatial_distortion = spatial_distortion
-    self.num_images = num_images
-    self.appearance_embedding_dim = appearance_embedding_dim
-    self.embedding_appearance = Embedding(self.num_images, self.appearance_embedding_dim)
-    self.use_average_appearance_embedding = use_average_appearance_embedding
-    self.use_transient_embedding = use_transient_embedding
-    self.use_semantics = use_semantics
-    self.use_pred_normals = use_pred_normals
-    self.pass_semantic_gradients = pass_semantic_gradients
-    self.base_res = base_res
+        self.register_buffer("max_res", torch.tensor(max_res))
+        self.register_buffer("num_levels", torch.tensor(num_levels))
+        self.register_buffer("log2_hashmap_size", torch.tensor(log2_hashmap_size))
 
-    #specify method used for direction encoding
-    self.direction_encoding = SHEncoding(
-        levels = 4,
-        implementation = implementation
-    )
+        self.spatial_distortion = spatial_distortion
+        self.num_images = num_images
+        self.appearance_embedding_dim = appearance_embedding_dim
+        self.embedding_appearance = Embedding(self.num_images, self.appearance_embedding_dim)
+        self.use_average_appearance_embedding = use_average_appearance_embedding
+        self.use_transient_embedding = use_transient_embedding
+        self.use_semantics = use_semantics
+        self.use_pred_normals = use_pred_normals
+        self.pass_semantic_gradients = pass_semantic_gradients
+        self.base_res = base_res
 
-    #specify method used for position encoding
-    self.position_encoding = NeRFEncoding(
-        in_dim=2,
-        num_frequencies = 2,
-        min_freq_exp=0,
-        max_freq_exp=2 - 1,
-        implementation=implementation
-    )
+        #specify method used for direction encoding
+        self.direction_encoding = SHEncoding(
+            levels = 4,
+            implementation = implementation
+        )
 
-    self.mlp_base_grid = HashEncoding(
-        num_levels=num_levels,
-        min_res=base_res,
-        max_res=max_res,
-        log2_hashmap_size=log2_hashmap_size,
-        features_per_level=features_per_level,
-        implementation=implementation,
-    )
-    self.mlp_base_mlp = MLP(
-        in_dim=self.mlp_base_grid.get_out_dim(),
-        num_layers=num_layers,
-        layer_width=hidden_dim,
-        out_dim=1 + self.geo_feat_dim,
-        activation=nn.ReLU(),
-        out_activation=None,
-        implementation=implementation,
-    )
+        #specify method used for position encoding
+        self.position_encoding = NeRFEncoding(
+            in_dim=2,
+            num_frequencies = 2,
+            min_freq_exp=0,
+            max_freq_exp=2 - 1,
+            implementation=implementation
+        )
 
-    self.mlp_base = torch.nn.Sequential(self.mlp_base_grid,self.mlp_base_mlp)
+        self.mlp_base_grid = HashEncoding(
+            num_levels=num_levels,
+            min_res=base_res,
+            max_res=max_res,
+            log2_hashmap_size=log2_hashmap_size,
+            features_per_level=features_per_level,
+            implementation=implementation,
+        )
 
-    #create sky network to predict color for pixels that pass through the sky
-    self.mlp_skynet = MLP(
-        in_dim=self.position_encoding.get_out_dim(),
-        num_layers=num_layers_color,
-        layer_width=hidden_dim_color,
-        out_dim=3,
-        activation=nn.ReLU(),
-        out_activation=nn.Sigmoid(),
-        implementation=implementation
-    )
+        self.mlp_base_mlp = MLP(
+            in_dim=self.mlp_base_grid.get_out_dim(),
+            num_layers=num_layers,
+            layer_width=hidden_dim,
+            out_dim=1 + self.geo_feat_dim,
+            activation=nn.ReLU(),
+            out_activation=None,
+            implementation=implementation,
+        )
 
-    #create normal color network for pixels that don't pass through sky regions
-    self.mlp_head = MLP(
-        in_dim=self.geo_feat_dim + self.appearance_embedding_dim,
-        num_layers=num_layers_color,
-        layer_width=hidden_dim_color,
-        out_dim=3,
-        activation=nn.ReLU(),
-        out_activation=nn.Sigmoid(),
-        implementation=implementation
-    )
+        self.mlp_base = torch.nn.Sequential(self.mlp_base_grid,self.mlp_base_mlp)
+
+        #create sky network to predict color for pixels that pass through the sky
+        self.mlp_skynet = MLP(
+            in_dim=self.direction_encoding.get_out_dim(),
+            num_layers=num_layers_color,
+            layer_width=hidden_dim_color,
+            out_dim=3,
+            activation=nn.ReLU(),
+            out_activation=nn.Sigmoid(),
+            implementation=implementation
+        )
+
+        #create normal color network for pixels that don't pass through sky regions
+        self.mlp_head = MLP(
+            in_dim=self.direction_encoding.get_out_dim() + self.geo_feat_dim + self.appearance_embedding_dim,
+            num_layers=num_layers_color,
+            layer_width=hidden_dim_color,
+            out_dim=3,
+            activation=nn.ReLU(),
+            out_activation=nn.Sigmoid(),
+            implementation=implementation
+        )
 
     def get_density(self, ray_samples: RaySamples) -> Tuple[Tensor, Tensor]:
         """Computes densities and returns them"""
         if self.spatial_distortion is not None:
-            positions=ray_samples.frustrums.get_positions()
+            positions=ray_samples.frustums.get_positions()
             #apply relevant spatial distortion
             positions=self.spatial_distortion(positions)
             positions=(positions+2.0)/4.0
@@ -166,9 +169,13 @@ def __init__(
         if ray_samples.camera_indices is None:
             raise AttributeError("Camera indices are not provided.")
         camera_indices = ray_samples.camera_indices.squeeze()
-        directions = shift_directions_for_tcnn(ray_samples.frustums.directions)
+
+        directions = get_normalized_directions(ray_samples.frustums.directions)
+        ray_directions_only = directions[:,:1,:].squeeze()
+
         directions_flat = directions.view(-1, 3)
         d = self.direction_encoding(directions_flat)
+        d_sky = self.direction_encoding(ray_directions_only)
 
         outputs_shape = ray_samples.frustums.directions.shape[:-1]
 
@@ -189,28 +196,20 @@ def __init__(
             [
                 d,
                 density_embedding.view(-1, self.geo_feat_dim),
-                embedded_appearance.view(-1, self.appearance_embedding_dim),
-            ],
+            ]
+            + (
+                [embedded_appearance.view(-1, self.appearance_embedding_dim)] if embedded_appearance is not None else []
+            ),
             dim=-1,
         )
 
+        rgb_sky = self.mlp_skynet(d_sky).to(directions)
 
-        sky_rays = ray_samples.metadata["sky_pixels"]
-        rgbs=[]
+        rgb_normal = self.mlp_head(h).view(*outputs_shape, -1).to(directions)
 
-        #iterate through the rays and identify sky pixels
-        for i in range(h.shape[0]):
-            sky = sky_rays[i]
-            if (sky):
-                rgb = self.mlp_skynet(h[i]).to(directions[0])
-                rgbs.append(rgb)
-            else:
-                rgb = self.mlp_head(h[i]).to(directions[0])
-                rgbs.append(rgb)
+        outputs.update({FieldHeadNames.RGB: rgb_normal, "rgb_sky": rgb_sky})
 
-        rgb = rgbs.view(*outputs_shape, -1).to(directions)
-
-        outputs.update({FieldHeadNames.RGB: rgb})
+        return outputs
 
 
 

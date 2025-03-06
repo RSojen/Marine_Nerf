@@ -63,6 +63,7 @@ class Marine_Nerf_Pipeline(VanillaPipeline):
             metadata=self.datamanager.train_dataset.metadata,
             grad_scaler=grad_scaler,
         )
+
         self.model.to(device)
 
         self.world_size = world_size

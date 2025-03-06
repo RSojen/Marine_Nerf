@@ -17,6 +17,8 @@ from nerfstudio.field_components.field_heads import FieldHeadNames
 from nerfstudio.field_components.spatial_distortions import SceneContraction
 from nerfstudio.fields.density_fields import HashMLPDensityField
 from Marine_Nerf_Implementation.Marine_Nerf_Field import Marine_Nerf_Field
+
+from nerfstudio.model_components import losses
 from nerfstudio.model_components.losses import (
     MSELoss,
     distortion_loss,
@@ -26,9 +28,7 @@ from nerfstudio.model_components.losses import (
     scale_gradients_by_distance_squared,
     sky_segmentation_loss
 )
-
 from nerfstudio.model_components.losses import DepthLossType, depth_loss, depth_ranking_loss
-
 from nerfstudio.model_components.ray_samplers import ProposalNetworkSampler, UniformSampler, PDFSampler
 from nerfstudio.model_components.renderers import AccumulationRenderer, DepthRenderer, NormalsRenderer, RGBRenderer
 from nerfstudio.model_components.scene_colliders import NearFarCollider
@@ -112,6 +112,20 @@ class Marine_Nerf_ModelConfig(ModelConfig):
     """Dimension of the appearance embedding."""
     camera_optimizer: CameraOptimizerConfig = field(default_factory=lambda: CameraOptimizerConfig(mode="SO3xR3"))
     """Config of the camera optimizer to use"""
+    depth_loss_mult: float = 1e-3
+    """Lambda of the depth loss."""
+    is_euclidean_depth: bool = False
+    """Whether input depth maps are Euclidean distances (or z-distances)."""
+    depth_sigma: float = 0.01
+    """Uncertainty around depth values in meters (defaults to 1cm)."""
+    should_decay_sigma: bool = False
+    """Whether to exponentially decay sigma."""
+    starting_depth_sigma: float = 0.2
+    """Starting uncertainty around depth values in meters (defaults to 0.2m)."""
+    sigma_decay_rate: float = 0.99985
+    """Rate of exponential decay."""
+    depth_loss_type: DepthLossType = DepthLossType.URF
+    """Depth loss type.""" "URF Depth loss or DSNerf depth loss or MiDaS scale and shift invariant loss"
 
 
 class Marine_Nerf_Model(Model):
@@ -122,6 +136,11 @@ class Marine_Nerf_Model(Model):
     def populate_modules(self):
 
         super().populate_modules()
+
+        if self.config.should_decay_sigma:
+            self.depth_sigma = torch.tensor([self.config.starting_depth_sigma])
+        else:
+            self.depth_sigma = torch.tensor([self.config.depth_sigma])
 
         if self.config.disable_scene_contraction:
             scene_contraction = None
@@ -269,7 +288,6 @@ class Marine_Nerf_Model(Model):
 
     def get_outputs(self, ray_bundle: RayBundle):
         # apply the camera optimizer pose tweaks
-        print("getting outputs")
         if self.training:
             self.camera_optimizer.apply_to_raybundle(ray_bundle)
         ray_samples: RaySamples
@@ -282,7 +300,9 @@ class Marine_Nerf_Model(Model):
         weights_list.append(weights)
         ray_samples_list.append(ray_samples)
 
-        rgb = self.renderer_rgb(rgb=field_outputs[FieldHeadNames.RGB], weights=weights)
+        #final rgb is combination of ray integral and predicted sky color
+        rgb = self.renderer_rgb(rgb=field_outputs[FieldHeadNames.RGB], weights=weights) + field_outputs["rgb_sky"]
+
         with torch.no_grad():
             depth = self.renderer_depth(weights=weights, ray_samples=ray_samples)
         expected_depth = self.renderer_expected_depth(weights=weights, ray_samples=ray_samples)
@@ -319,6 +339,9 @@ class Marine_Nerf_Model(Model):
 
         for i in range(self.config.num_proposal_iterations):
             outputs[f"prop_depth_{i}"] = self.renderer_depth(weights=weights_list[i], ray_samples=ray_samples_list[i])
+
+        if ray_bundle.metadata is not None and "directions_norm" in ray_bundle.metadata:
+            outputs["directions_norm"] = ray_bundle.metadata["directions_norm"]
         return outputs
 
     def get_metrics_dict(self, outputs, batch):
@@ -331,24 +354,29 @@ class Marine_Nerf_Model(Model):
 
         if self.training:
             metrics_dict["distortion"] = distortion_loss(outputs["weights_list"], outputs["ray_samples_list"])
-
-        self.camera_optimizer.get_metrics_dict(metrics_dict)
-        if self.training:
-
             metrics_dict["depth_loss"] = 0.0
+            metrics_dict["sky_loss"] = 0.0
             sigma = self._get_sigma().to(self.device)
             termination_depth = batch["depth_image"].to(self.device)
+            # sky mask
+            sky_mask = batch["sky_mask"].squeeze().to(self.device)
             for i in range(len(outputs["weights_list"])):
                 metrics_dict["depth_loss"] += depth_loss(
                     weights=outputs["weights_list"][i],
                     ray_samples=outputs["ray_samples_list"][i],
                     termination_depth=termination_depth,
-                    predicted_depth=outputs["depth"],
+                    #since we are using URF loss we use expected depth
+                    predicted_depth=outputs["expected_depth"],
                     sigma=sigma,
                     directions_norm=outputs["directions_norm"],
                     is_euclidean=self.config.is_euclidean_depth,
                     depth_loss_type=self.config.depth_loss_type,
                 ) / len(outputs["weights_list"])
+
+                metrics_dict["sky_loss"] += sky_segmentation_loss(
+                    weights=outputs["weights_list"][i][sky_mask]
+                ) / len(outputs["weights_list"])
+
             if (
                     losses.FORCE_PSEUDODEPTH_LOSS
                     and self.config.depth_loss_type not in losses.PSEUDODEPTH_COMPATIBLE_LOSSES
@@ -356,27 +384,8 @@ class Marine_Nerf_Model(Model):
                 raise ValueError(
                     f"Forcing pseudodepth loss, but depth loss type ({self.config.depth_loss_type}) must be one of {losses.PSEUDODEPTH_COMPATIBLE_LOSSES}"
                 )
-            if self.config.depth_loss_type in (DepthLossType.DS_NERF, DepthLossType.URF):
-                metrics_dict["depth_loss"] = 0.0
-                sigma = self._get_sigma().to(self.device)
-                termination_depth = batch["depth_image"].to(self.device)
-                for i in range(len(outputs["weights_list"])):
-                    metrics_dict["depth_loss"] += depth_loss(
-                        weights=outputs["weights_list"][i],
-                        ray_samples=outputs["ray_samples_list"][i],
-                        termination_depth=termination_depth,
-                        predicted_depth=outputs["expected_depth"],
-                        sigma=sigma,
-                        directions_norm=outputs["directions_norm"],
-                        is_euclidean=self.config.is_euclidean_depth,
-                        depth_loss_type=self.config.depth_loss_type,
-                    ) / len(outputs["weights_list"])
-            elif self.config.depth_loss_type in (DepthLossType.SPARSENERF_RANKING,):
-                metrics_dict["depth_ranking"] = depth_ranking_loss(
-                    outputs["expected_depth"], batch["depth_image"].to(self.device)
-                )
-            else:
-                raise NotImplementedError(f"Unknown depth loss type {self.config.depth_loss_type}")
+
+        self.camera_optimizer.get_metrics_dict(metrics_dict)
 
         return metrics_dict
 
@@ -391,27 +400,12 @@ class Marine_Nerf_Model(Model):
             gt_image=image,
         )
 
-        sky_mask = batch["sky_mask"]
-        ray_samples = outputs["ray_samples_list"]
-        weights_list = outputs["weights_list"]
-
-        #iterate through masks
-        indices = torch.masked_fill(torch.cumsum(sky_mask.int(), dim=1), ~sky_mask, 0)
-        masked_samples = torch.scatter(input=torch.zeros_like(ray_samples), dim=1, index=indices, src=ray_samples)[:, 1:]
-        masked_weights = torch.scatter(input=torch.zeros_like(weights_list), dim=1, index=indices, src=weights_list)[:, 1:]
-
-        for i in range(len(outputs["weights_list"])):
-            loss_dict["sky_loss"] += sky_segmentation_loss(
-                weights=masked_samples[i],
-                ray_samples=masked_weights[i],
-            ) / len(outputs["weights_list"])
-
         loss_dict["rgb_loss"] = self.rgb_loss(gt_rgb, pred_rgb)
         if self.training:
             loss_dict["interlevel_loss"] = self.config.interlevel_loss_mult * interlevel_loss(
                 outputs["weights_list"], outputs["ray_samples_list"]
             )
-            assert metrics_dict is not None and "distortion" in metrics_dict
+            assert metrics_dict is not None and "distortion" in metrics_dict and ("depth_loss" in metrics_dict or "depth_ranking" in metrics_dict)
             loss_dict["distortion_loss"] = self.config.distortion_loss_mult * metrics_dict["distortion"]
             if self.config.predict_normals:
                 # orientation loss for computed normals
@@ -425,6 +419,17 @@ class Marine_Nerf_Model(Model):
                 )
             # Add loss from camera optimizer
             self.camera_optimizer.get_loss_dict(loss_dict)
+            if "depth_ranking" in metrics_dict:
+                loss_dict["depth_ranking"] = (
+                        self.config.depth_loss_mult
+                        * np.interp(self.step, [0, 2000], [0, 0.2])
+                        * metrics_dict["depth_ranking"]
+                )
+            if "depth_loss" in metrics_dict:
+                loss_dict["depth_loss"] = self.config.depth_loss_mult * metrics_dict["depth_loss"]
+            if "sky_loss" in metrics_dict:
+                loss_dict["sky_loss"] = metrics_dict["sky_loss"]
+
         return loss_dict
 
 
@@ -467,6 +472,14 @@ class Marine_Nerf_Model(Model):
             images_dict[key] = prop_depth_i
 
         return metrics_dict, images_dict
+    def _get_sigma(self):
+        if not self.config.should_decay_sigma:
+            return self.depth_sigma
+
+        self.depth_sigma = torch.maximum(
+            self.config.sigma_decay_rate * self.depth_sigma, torch.tensor([self.config.depth_sigma])
+        )
+        return self.depth_sigma
 
 
 

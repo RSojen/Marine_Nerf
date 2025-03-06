@@ -1,0 +1,4 @@
+from nerfstudio.plugins.registry_dataparser import DataParserSpecification
+from Marine_Nerf_Implementation.Marine_Nerf_dataparser import Marine_Nerf_Dataparser_Config
+
+Marine_Nerf_Dataparser = DataParserSpecification(config=Marine_Nerf_Dataparser_Config())

@@ -1,19 +1,30 @@
+from nerfstudio.cameras.camera_optimizers import CameraOptimizerConfig
+from nerfstudio.configs.base_config import ViewerConfig
+from nerfstudio.data.dataparsers.nerfstudio_dataparser import NerfstudioDataParserConfig
+from nerfstudio.engine.optimizers import AdamOptimizerConfig, RAdamOptimizerConfig
+from nerfstudio.engine.schedulers import ExponentialDecaySchedulerConfig
 from nerfstudio.engine.trainer import TrainerConfig
 from nerfstudio.plugins.types import MethodSpecification
+from nerfstudio.plugins.registry_dataparser import DataParserSpecification
+from nerfstudio.data.datasets.depth_dataset import DepthDataset
+from nerfstudio.data.pixel_samplers import PairPixelSamplerConfig
 
 from Marine_Nerf_Implementation.Marine_Nerf_Model import Marine_Nerf_ModelConfig
-from Marine_Nerf_Implementation.Marine_Nerf_dataparser import Marine_Nerf_Dataparser, Marine_Nerf_Dataparser_Config
+from Marine_Nerf_Implementation.Marine_Nerf_dataparser import Marine_Nerf_Dataparser_Config
+from Marine_Nerf_Implementation.Marine_Nerf_datamanager import Marine_Nerf_DataManager, Marine_Nerf_DataManagerConfig
+from Marine_Nerf_Implementation.Marine_Nerf_pipeline import Marine_Nerf_Pipeline, Marine_Nerf_PipelineConfig
 
-MyMethod = MethodSpecification(
+
+Marine_Nerf = MethodSpecification(
   config=TrainerConfig(
     method_name="Marine-Nerf",
     steps_per_eval_batch=500,
     steps_per_save=2000,
     max_num_iterations=30000,
     mixed_precision=True,
-    pipeline=VanillaPipelineConfig(
-        datamanager=VanillaDataManagerConfig(
-            _target=VanillaDataManager[DepthDataset],
+    pipeline=Marine_Nerf_PipelineConfig(
+        datamanager=Marine_Nerf_DataManagerConfig(
+            _target=Marine_Nerf_DataManager[DepthDataset],
             pixel_sampler=PairPixelSamplerConfig(),
             dataparser=Marine_Nerf_Dataparser_Config(),
             train_num_rays_per_batch=15000,

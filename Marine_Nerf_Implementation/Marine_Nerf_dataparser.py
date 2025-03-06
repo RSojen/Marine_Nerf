@@ -269,7 +269,6 @@ class Marine_Nerf_Dataparser(DataParser):
             width=width,
             camera_to_worlds=poses[:, :3, :4],
             camera_type=camera_type,
-            metadata = {"sky_masks": sky_masks_filenames}
         )
 
         #create metadata

@@ -16,6 +16,7 @@ import tyro
 from rich.progress import track
 from torch.nn import Parameter
 from typing_extensions import assert_never, TypeVar
+from collections import defaultdict
 
 from nerfstudio.cameras.camera_optimizers import CameraOptimizerConfig
 from nerfstudio.cameras.cameras import Cameras, CameraType
@@ -33,6 +34,35 @@ from nerfstudio.data.datamanagers.base_datamanager import DataManager, DataManag
 from nerfstudio.data.utils.nerfstudio_collate import nerfstudio_collate
 from Marine_Nerf_Implementation.Marine_Nerf_dataparser import Marine_Nerf_Dataparser_Config
 
+
+def variable_res_collate(batch: List[Dict]) -> Dict:
+    """Default collate function for the cached dataloader.
+    Args:
+        batch: Batch of samples from the dataset.
+    Returns:
+        Collated batch.
+    """
+    images = []
+    imgdata_lists = defaultdict(list)
+    for data in batch:
+        image = data.pop("image")
+        images.append(image)
+        topop = []
+        for key, val in data.items():
+            if isinstance(val, torch.Tensor):
+                # if the value has same height and width as the image, assume that it should be collated accordingly.
+                if len(val.shape) >= 2 and val.shape[:2] == image.shape[:2]:
+                    imgdata_lists[key].append(val)
+                    topop.append(key)
+        # now that iteration is complete, the image data items can be removed from the batch
+        for key in topop:
+            del data[key]
+
+    new_batch = nerfstudio_collate(batch)
+    new_batch["image"] = images
+    new_batch.update(imgdata_lists)
+
+    return new_batch
 
 @dataclass
 class Marine_Nerf_DataManagerConfig(DataManagerConfig):
@@ -66,7 +96,6 @@ class Marine_Nerf_DataManagerConfig(DataManagerConfig):
     """
     patch_size: int = 1
     """Size of patch to sample from. If > 1, patch-based sampling will be used."""
-
     # tyro.conf.Suppress prevents us from creating CLI arguments for this field.
     camera_optimizer: tyro.conf.Suppress[Optional[CameraOptimizerConfig]] = field(default=None)
     """Deprecated, has been moved to the model config."""
@@ -156,15 +185,15 @@ class Marine_Nerf_DataManager(DataManager, Generic[TDataset]):
     def dataset_type(self) -> Type[TDataset]:
         """Returns the dataset type passed as the generic argument"""
         default: Type[TDataset] = cast(TDataset, TDataset.__default__)  # type: ignore
-        orig_class: Type[VanillaDataManager] = get_orig_class(self, default=None)  # type: ignore
-        if type(self) is VanillaDataManager and orig_class is None:
+        orig_class: Type[Marine_Nerf_DataManager] = get_orig_class(self, default=None)  # type: ignore
+        if type(self) is Marine_Nerf_DataManager and orig_class is None:
             return default
-        if orig_class is not None and get_origin(orig_class) is VanillaDataManager:
+        if orig_class is not None and get_origin(orig_class) is Marine_Nerf_DataManager:
             return get_args(orig_class)[0]
 
         # For inherited classes, we need to find the correct type to instantiate
         for base in getattr(self, "__orig_bases__", []):
-            if get_origin(base) is VanillaDataManager:
+            if get_origin(base) is Marine_Nerf_DataManager:
                 for value in get_args(base):
                     if isinstance(value, ForwardRef):
                         if value.__forward_evaluated__:
@@ -266,7 +295,6 @@ class Marine_Nerf_DataManager(DataManager, Generic[TDataset]):
         assert isinstance(image_batch, dict)
         batch = self.train_pixel_sampler.sample(image_batch)
         ray_indices = batch["indices"]
-        print("generating rays")
         ray_bundle = self.train_ray_generator(ray_indices)
         return ray_bundle, batch
 
